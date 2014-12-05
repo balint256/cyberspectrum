@@ -54,10 +54,10 @@ except Exception, e:
 
 from gnuradio import gr, uhd
 try:
-	import uhdx
+	from baz import usrp_acquire
 except Exception, e:
-	print "uhdx will not be available (failed to import):", e
-	uhdx = None
+	print "baz.usrp_acquire will not be available (failed to import):", e
+	usrp_acquire = None
 
 from utils import *
 from primitives import *
@@ -245,11 +245,11 @@ def main():
 			print "Unknown exception:", e
 			break
 		
-		uhdx_acquire = None
-		if uhdx:
-			#uhdx_acquire = uhdx.acquire(usrp.get_device(), stream_args)
-			uhdx_acquire = uhdx.acquire.make_from_source(usrp.to_basic_block(), stream_args)
-			print "Using uhdx"
+		usrp_acquire_src = None
+		if usrp_acquire:
+			#usrp_acquire_src = usrp_acquire(usrp.get_device(), stream_args)
+			usrp_acquire_src = usrp_acquire.make_from_source(usrp.to_basic_block(), stream_args)
+			print "Using usrp_acquire"
 		else:
 			print "Using uhd"
 		
@@ -528,11 +528,11 @@ def main():
 					
 					acquisition_start = time.time()
 					
-					if uhdx_acquire:
+					if usrp_acquire_src:
 						stream_now = (len(channels) == 1)
 						delay = 0.01
 						timeout = 1.0
-						sample_ptrs = uhdx_acquire.finite_acquisition_v(total_sample_count, stream_now=stream_now, delay=delay, timeout=timeout)	# FIXME: skip samples (offset into array)
+						sample_ptrs = usrp_acquire_src.finite_acquisition_v(total_sample_count, stream_now=stream_now, delay=delay, skip=config.skip_samples, timeout=timeout)	# FIXME: skip samples (offset into array)
 						samples = []
 						acquired_sample_count = sample_ptrs[-1]
 						for sample_ptr_idx in range(len(sample_ptrs)-1):
@@ -553,6 +553,10 @@ def main():
 					partial_name = "%s-%s-%05d-%d-%d-%.1f-%s" % (config.name, time_now_str, count, channel_count, int(hw_state.freq), hw_state.gain, hw_state.get_antenna())
 					partial_name = partial_name.replace("/", "_").replace(":", "_").replace(" ", "_")
 					
+					expected_sample_count = config.sample_count
+					if usrp_acquire_src is None:
+						expected_sample_count += config.skip_samples
+					
 					sample_idx = 0
 					for s in samples:
 						if len(s) == 0:
@@ -566,21 +570,21 @@ def main():
 							print "Channel %d: didn't receive any samples - retrying..." % (sample_idx)
 							retry = True
 							break
-						elif len(s) != total_sample_count:
+						elif len(s) != expected_sample_count:
 							
 							if options.abort:
-								print "Channel %d: only received %d samples (%d short) - aborting." % (sample_idx, len(s), (total_sample_count-len(s)))
+								print "Channel %d: only received %d samples (%d short) - aborting." % (sample_idx, len(s), (expected_sample_count-len(s)))
 								running = False
 								break
 							elif options.restart:
-								print "Channel %d: only received %d samples (%d short) - restarting." % (sample_idx, len(s), (total_sample_count-len(s)))
+								print "Channel %d: only received %d samples (%d short) - restarting." % (sample_idx, len(s), (expected_sample_count-len(s)))
 								raise RestartException()
-							print "Channel %d: only received %d samples (%d short) - retrying..." % (sample_idx, len(s), (total_sample_count-len(s)))
+							print "Channel %d: only received %d samples (%d short) - retrying..." % (sample_idx, len(s), (expected_sample_count-len(s)))
 							retry = True
 							break
 						print "Channel %d: received %d samples" % (sample_idx, len(s))
 						
-						if config.skip_samples > 0:
+						if config.skip_samples > 0 and usrp_acquire_src is None:
 							print "Removing skipped samples..."
 							s = numpy.array(s[config.skip_samples:])	# This is slow
 							print "Removed skipped samples."
@@ -694,7 +698,7 @@ def main():
 						iteration_stats.max()*1e3)
 			except RestartException:
 				print "Deleting USRP for restart..."
-				del uhdx_acquire
+				del usrp_acquire_src
 				del usrp
 				break
 			except wx._core.PyDeadObjectError:
@@ -714,7 +718,7 @@ def main():
 				# How to handle such errors as bad MCR? Try dummy iteration?
 				
 				print "Deleting USRP..."
-				del uhdx_acquire
+				del usrp_acquire_src
 				del usrp
 				
 				if options.abort:
