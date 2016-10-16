@@ -24,6 +24,10 @@
 #  
 #  
 
+# TODO:
+# - GPS logging module
+# - exception handling around GUI close (and when it doesn't raise, figure out why it remains blank)
+
 import sys, socket, traceback, time, datetime, os, signal
 from optparse import OptionParser
 
@@ -77,7 +81,8 @@ running = True
 
 def signal_term_handler(signal, frame):
 	global running
-	print "Received SIGTERM"
+	print
+	print "Received signal"
 	running = False
 
 # RuntimeError: EnvironmentError: IOError: Radio ctrl (A) packet parse error - AssertionError: packet_info.packet_count == (seq_to_ack & 0xfff)
@@ -123,8 +128,27 @@ def main():
 	parser.add_option("", "--abort", action="store_true", default=False, help="Abort on error that is otherwise retried [default: %default]")
 	parser.add_option("", "--restart", action="store_true", default=False, help="Restart on error that is otherwise retried [default: %default]")
 	parser.add_option("--once", action="store_true", default=False, help="Exit instead of looping [default=%default]")
+	parser.add_option("", "--retry-sleep", type="float", default=0.5, help="Sleep time before retrying acquisition (s) [default=%default]")
+	parser.add_option("-o", "--otw", type="string", default=None, help="Over The Wire format [default=%default]")
+	parser.add_option("-t", "--type", type="string", default="fc32", help="CPU data/file format [default=%default]")
+	parser.add_option("-W", "--width", type="float", default=8, help="Graph width [default=%default]")
+	parser.add_option("-H", "--height", type="float", default=10, help="Graph height [default=%default]")
+	parser.add_option("", "--flush", type="int", default=16, help="Samples to receive for flush during retry [default=%default]")
+	parser.add_option("", "--delay", type="float", default=0.01, help="Stream command time delay (s) [default=%default]")
+	parser.add_option("", "--force-delay", action="store_true", default=False, help="Delay on single channel capture [default: %default]")
 	
 	(options, args) = parser.parse_args()
+
+	numpy_dtypes = {'fc32': (numpy.complex64, False), 'sc16': (numpy.int16, True), 'sc8': (numpy.int8, True)}
+
+	if usrp_acquire is None:
+		if options.type != "fc32":
+			print "Type '%s' not supported when using generic GNU Radio interface (install gr-baz)" % (options.type)
+			return
+	else:
+		if options.type not in numpy_dtypes.keys():
+			print "Type '%s' not supported by 'usrp_acquire' interface" % (options.type)
+			return
 	
 	config = None
 	if len(args) >= 1 and args[0] != "-":
@@ -135,7 +159,7 @@ def main():
 			print "Config '%s' not found" % (args[0])
 			return
 	
-	if config == None:
+	if config is None:
 		config = _config.Config("(default)")
 	
 	print "Using config:", config.name
@@ -145,7 +169,7 @@ def main():
 		return
 	
 	if options.args is not None:
-		print "Overriding args \"%s\" with \"%s\"" % (options.args, options.args)
+		print "Overriding config args \"%s\" with \"%s\"" % (config.args, options.args)
 		config.args = options.args
 	
 	if options.length is not None and len(options.length) > 0:
@@ -185,7 +209,8 @@ def main():
 	channels = range(channel_count)
 	
 	signal.signal(signal.SIGTERM, signal_term_handler)
-	print "Installed signal handler"
+	signal.signal(signal.SIGINT, signal_term_handler)
+	print "Installed signal handlers"
 	
 	fft_graph = None
 	fft_channel_graphs = {}
@@ -224,9 +249,14 @@ def main():
 			#print opt.dest, "=", o
 			setattr(options, opt.dest, o)
 		
+		stream_kwds = {}
+		if options.otw is not None and len(options.otw) > 0:
+			stream_kwds['otw_format'] = options.otw
+
 		stream_args = uhd.stream_args(
-			cpu_format="fc32",	# Fixed for finite_acquisition
+			cpu_format=options.type,
 			channels=channels,
+			**stream_kwds
 		)
 		
 		# FIXME: This can throw on X310
@@ -250,8 +280,14 @@ def main():
 			#usrp_acquire_src = usrp_acquire(usrp.get_device(), stream_args)
 			usrp_acquire_src = usrp_acquire.make_from_source(usrp.to_basic_block(), stream_args)
 			print "Using usrp_acquire"
+			assert(stream_args.cpu_format in numpy_dtypes.keys())
+			numpy_dtype = numpy_dtypes[stream_args.cpu_format][0]
+			make_complex = numpy_dtypes[stream_args.cpu_format][1]
 		else:
 			print "Using uhd"
+			assert(stream_args.cpu_format == "fc32")
+			numpy_dtype = numpy.complex64
+			make_complex = False
 		
 		info = {}
 		uhd_info = usrp.get_usrp_info()
@@ -270,9 +306,13 @@ def main():
 			print "GPS not available"
 		else:
 			print "GPS sensors available:", _available_nmea_sensors
+
+		if config.master_clock_rate is not None:
+			usrp.set_clock_rate(config.master_clock_rate)
 		
 		usrp.set_samp_rate(config.rate)
 		
+		print "Master clock rate:", usrp.get_clock_rate()
 		print "Sample rate:", usrp.get_samp_rate()
 		#print "Sample rates:", len(usrp.get_samp_rates())
 		#print "Center freq:", usrp.get_center_freq()
@@ -343,8 +383,8 @@ def main():
 			
 			padding = 0.05
 			spacing = 0.1
-			figure_width = 8
-			figure_height = 10
+			figure_width = options.width
+			figure_height = options.height
 			
 			if channel_count > 2:
 				channel_pos = 220
@@ -356,8 +396,8 @@ def main():
 			
 			figsize = (figure_width, figure_height)
 			padding = {'wspace':spacing,'hspace':spacing,'top':1.-padding,'left':padding,'bottom':padding,'right':1.-padding}
-			fft_graph = realtime_graph(title="FFT", show=True, manual=True, redraw=False, figsize=figsize, padding=padding)
 			scope_graph = realtime_graph(title="Scope", show=True, manual=True, redraw=False, figsize=figsize, padding=padding)
+			fft_graph = realtime_graph(title="FFT", show=True, manual=True, redraw=False, figsize=figsize, padding=padding)
 			
 			pos_count = 0
 			y_limits = (config.noise_floor - 10.0, -30*0)	# For FFT	# FIXME: Arg
@@ -367,11 +407,11 @@ def main():
 				#else:
 				pos_offset = pos_count + 1
 				subplot_pos = (channel_pos + pos_offset)
+
+				scope_channel_graphs[channel_idx] = sub_graph = realtime_graph(parent=scope_graph, show=True, redraw=False, sub_title="Channel %i" % (channel_idx), pos=subplot_pos)	#, x_range=NUM_BINS_SPUR, y_limits=y_limits
 				
 				fft_channel_graphs[channel_idx] = sub_graph = realtime_graph(parent=fft_graph, show=True, redraw=False, sub_title="Channel %i" % (channel_idx), pos=subplot_pos, y_limits=y_limits, x_range=gui_fft_length)
 				sub_graph.add_horz_line(config.noise_floor)
-				
-				scope_channel_graphs[channel_idx] = sub_graph = realtime_graph(parent=scope_graph, show=True, redraw=False, sub_title="Channel %i" % (channel_idx), pos=subplot_pos)	#, x_range=NUM_BINS_SPUR, y_limits=y_limits
 				
 				pos_count = pos_count + 1
 			
@@ -482,6 +522,9 @@ def main():
 						tune_stats.min()*1e3,	#min(tune_times)*1e3,
 						tune_stats.max()*1e3)	#max(tune_times)*1e3)
 					
+					if hw_state.bandwidth is not None:
+						usrp.set_bandwidth(hw_state.bandwidth, channel_idx)
+
 					if config.linked and channel_idx > 0:
 						continue
 					
@@ -522,65 +565,101 @@ def main():
 							continue
 				
 				retry = True
-				total_sample_count = config.sample_count + config.skip_samples
-				while retry:
+				flush = False
+				while retry and running:
 					retry = False	# Default path is to break from the loop
+
+					if flush:
+						total_sample_count = options.flush # This always seems to cause 0 samples to be acquired
+						skip_samples = 0
+					else:
+						total_sample_count = config.sample_count + config.skip_samples
+						skip_samples = config.skip_samples
 					
 					acquisition_start = time.time()
+
+					orig_samples = []
 					
 					if usrp_acquire_src:
-						stream_now = (len(channels) == 1)
-						delay = 0.01
+						if options.force_delay:
+							stream_now = False
+						else:
+							stream_now = (len(channels) == 1)
+						delay = options.delay
 						timeout = 1.0
-						sample_ptrs = usrp_acquire_src.finite_acquisition_v(total_sample_count, stream_now=stream_now, delay=delay, skip=config.skip_samples, timeout=timeout)	# FIXME: skip samples (offset into array)
+						sample_ptrs = usrp_acquire_src.finite_acquisition_v(total_sample_count, stream_now=stream_now, delay=delay, skip=skip_samples, timeout=timeout)
 						samples = []
 						acquired_sample_count = sample_ptrs[-1]
 						for sample_ptr_idx in range(len(sample_ptrs)-1):
-							samples += [pointer_to_ndarray(sample_ptrs[sample_ptr_idx], numpy.dtype(numpy.complex64), acquired_sample_count, True)]
+							if make_complex:
+								channel_samples = pointer_to_ndarray(sample_ptrs[sample_ptr_idx], numpy.dtype(numpy_dtype), acquired_sample_count * 2, True)
+								orig_samples.append(channel_samples)
+								complex_channel_samples = (channel_samples[::2] + (channel_samples[1::2] * 1j)) / (2.0**15)
+								samples.append(complex_channel_samples)
+							else:
+								samples.append(pointer_to_ndarray(sample_ptrs[sample_ptr_idx], numpy.dtype(numpy_dtype), acquired_sample_count, True))
+						if not make_complex:
+							orig_samples = samples
 					else:
 						samples = usrp.finite_acquisition_v(total_sample_count)
+						orig_samples = samples
+						acquired_sample_count = None
+						for s in samples:
+							if acquired_sample_count is None:
+								acquired_sample_count = len(s)
+							else:
+								acquired_sample_count = min(acquired_sample_count, len(s))
+					
+					if flush:
+						flush = False
+						retry = True
+						print "Retrying after flush (%d samples received)..." % (acquired_sample_count)
+						continue
+
+					expected_sample_count = config.sample_count
+					if usrp_acquire_src is None:
+						expected_sample_count += config.skip_samples
 					
 					acquisition_duration = time.time() - acquisition_start
-					acquisition_stats.add(acquisition_duration)
-					print "Acquisition time: %f ms (average: %f ms, min: %f ms, max: %f ms)" % (
-						acquisition_duration*1e3,
-						acquisition_stats.ave()*1e3,
-						acquisition_stats.min()*1e3,
-						acquisition_stats.max()*1e3)
+					if expected_sample_count == acquired_sample_count:
+						acquisition_stats.add(acquisition_duration)
+					else:
+						pass # FIXME: Per-channel length processing logic below should be moved here
+					if acquisition_stats.count() > 0:
+						print "Acquisition time: %f ms (average: %f ms, min: %f ms, max: %f ms)" % (
+							acquisition_duration*1e3,
+							acquisition_stats.ave()*1e3,
+							acquisition_stats.min()*1e3,
+							acquisition_stats.max()*1e3)
 					
 					computation_state = time.time()
 					
 					partial_name = "%s-%s-%05d-%d-%d-%.1f-%s" % (config.name, time_now_str, count, channel_count, int(hw_state.freq), hw_state.gain, hw_state.get_antenna())
 					partial_name = partial_name.replace("/", "_").replace(":", "_").replace(" ", "_")
 					
-					expected_sample_count = config.sample_count
-					if usrp_acquire_src is None:
-						expected_sample_count += config.skip_samples
-					
 					sample_idx = 0
 					for s in samples:
-						if len(s) == 0:
+						if len(s) != expected_sample_count:
 							if options.abort:
-								print "Channel %d: didn't receive any samples - aborting." % (sample_idx)
+								if len(s) == 0:
+									print "Channel %d: didn't receive any samples - aborting." % (sample_idx)
+								else:
+									print "Channel %d: only received %d samples (%d short) - aborting." % (sample_idx, len(s), (expected_sample_count-len(s)))
 								running = False
 								break
 							elif options.restart:
-								print "Channel %d: didn't receive any samples - restarting." % (sample_idx)
+								if len(s) == 0:
+									print "Channel %d: didn't receive any samples - restarting." % (sample_idx)
+								else:
+									print "Channel %d: only received %d samples (%d short) - restarting." % (sample_idx, len(s), (expected_sample_count-len(s)))
 								raise RestartException()
-							print "Channel %d: didn't receive any samples - retrying..." % (sample_idx)
+							if len(s) == 0:
+								print "Channel %d: didn't receive any samples - retrying..." % (sample_idx)
+							else:
+								print "Channel %d: only received %d samples (%d short) - retrying..." % (sample_idx, len(s), (expected_sample_count-len(s)))
+							time.sleep(options.retry_sleep)
 							retry = True
-							break
-						elif len(s) != expected_sample_count:
-							
-							if options.abort:
-								print "Channel %d: only received %d samples (%d short) - aborting." % (sample_idx, len(s), (expected_sample_count-len(s)))
-								running = False
-								break
-							elif options.restart:
-								print "Channel %d: only received %d samples (%d short) - restarting." % (sample_idx, len(s), (expected_sample_count-len(s)))
-								raise RestartException()
-							print "Channel %d: only received %d samples (%d short) - retrying..." % (sample_idx, len(s), (expected_sample_count-len(s)))
-							retry = True
+							flush = True
 							break
 						print "Channel %d: received %d samples" % (sample_idx, len(s))
 						
@@ -641,12 +720,16 @@ def main():
 									force_save = False
 							
 							if force_save is None or force_save == True:	# Default to save
-								capture_file_name = "%s-%d.cfile" % (partial_name, sample_idx)
+								capture_file_name = "%s-%d.%s.cfile" % (partial_name, sample_idx, stream_args.cpu_format)
 								capture_file_path = os.path.join(options.location, capture_file_name)
 								print "Saving to:", capture_file_path
 								try:
 									#f = open(capture_file_path, "w")
-									s.astype('c8').tofile(capture_file_path)
+									#s.astype('c8').tofile(capture_file_path)
+									if usrp_acquire is not None:
+										orig_samples[sample_idx].tofile(capture_file_path) # Should already be in correct format
+									else:
+										orig_samples[sample_idx].astype(numpy_dtype, copy=False).tofile(capture_file_path)									
 									#f.close()
 								except Exception, e:
 									print "Failed to save samples to file:", capture_file_path
@@ -654,17 +737,18 @@ def main():
 						
 						sample_idx += 1
 					
-					for m in modules: m.stop((sample_idx == channel_count))
+					successful = (sample_idx == channel_count)	# If it didn't break out of the inner-loop prematurely...
+					for m in modules: m.stop(successful)
 					
 					computation_duration = time.time() - computation_state
-					computation_stats.add(computation_duration)
-					print "Computation time: %f ms (average: %f ms, min: %f ms, max: %f ms)" % (
-						computation_duration*1e3,
-						computation_stats.ave()*1e3,
-						computation_stats.min()*1e3,
-						computation_stats.max()*1e3)
+					if successful:
+						computation_stats.add(computation_duration)
+						print "Computation time: %f ms (average: %f ms, min: %f ms, max: %f ms)" % (
+							computation_duration*1e3,
+							computation_stats.ave()*1e3,
+							computation_stats.min()*1e3,
+							computation_stats.max()*1e3)
 					
-					if sample_idx == channel_count:	# If it didn't break out of the inner-loop prematurely...
 						if fft_graph is not None:
 							fft_graph.redraw()
 							
@@ -690,7 +774,7 @@ def main():
 				
 				iteration_end = time.time()
 				iteration_duration = iteration_end - iteration_start
-				iteration_stats.add(iteration_duration)
+				iteration_stats.add(iteration_duration) # FIXME: Decide whether to add to stats if exiting a stuck retry loop
 				print "Iteration time: %f ms (average: %f ms, min: %f ms, max: %f ms)" % (
 						iteration_duration*1e3,
 						iteration_stats.ave()*1e3,
@@ -705,10 +789,10 @@ def main():
 				print "GUI window closed"
 				running = False
 				break
-			except KeyboardInterrupt:
-				print "Stopping..."
-				running = False
-				break
+			#except KeyboardInterrupt:	# Using signal handler instead
+			#	print "Stopping..."
+			#	running = False
+			#	break
 			except RuntimeError, e:
 				print "Likely UHD runtime exception:", e
 				#print "Args:", e.args

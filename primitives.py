@@ -93,18 +93,19 @@ class ChannelCapabilites():
 		)
 
 class HardwareState():
-	def __init__(self, state, gain, antenna, lo_offset, freq=None):
+	def __init__(self, state, gain, antenna, lo_offset, bandwidth, freq=None):
 		self.state = state
 		self.gain = gain
 		self.antenna = antenna
 		self.lo_offset = lo_offset
+		self.bandwidth = bandwidth
 		self.freq = freq
 	def get_antenna(self):
 		if len(self.antenna) == 0:
 			return "(default)"
 		return self.antenna
 	def __str__(self):
-		res = "Gain: %f, Antenna: %s, LO offset: %s" % (self.gain, self.get_antenna(), format_freq(self.lo_offset))
+		res = "Gain: %.1f, Antenna: %s, LO offset: %s, Bandwidth: %s" % (self.gain, self.get_antenna(), format_freq(self.lo_offset), format_freq(self.bandwidth))
 		if self.freq is not None:
 			res += ", Freq: %s" % (format_freq(self.freq))
 		return res
@@ -114,17 +115,18 @@ class ScannerState():
 		self.freq_range, self.freq_config, self.channel, self.config, self.chan_caps = freq_range, freq_config, channel, config, chan_caps
 		# Other parameters filled in by 'setup' in FrequencyRange
 		# FrequencyRange
-		self.start, self.stop, self.step, self.edge = None, None, None, None
+		self.start, self.stop, self.step, self.edge, self.bandwidth = None, None, None, None, None
 		# FrequencyConfig
 		self.gains = None
 		self.antennas = None
 		self.lo_offset = None
 	def __str__(self):
-		return "Freq: %s-%s (%s steps, edge: %s), Gains: %s, Antennas: %s, LO offset: %f" % (
+		return "Freq: %s-%s (%s steps, edge: %s), Gains: %s, Antennas: %s, LO offset: %s, Bandwidth: %s" % (
 			format_freq(self.start), format_freq(self.stop), format_freq(self.step), self.edge,
 			self.gains,
 			self.antennas,
-			self.lo_offset
+			format_freq(self.lo_offset),
+			format_freq(self.bandwidth)
 		)
 	def get_hw_states(self, calc_freqs):
 		states = []
@@ -133,6 +135,9 @@ class ScannerState():
 			if self.edge:
 				start = self.start + (self.config.rate / 2.0)
 				stop = self.stop - (self.config.rate / 2.0)
+
+				if stop < start: # If rate > freq range, pick center
+					start = stop = self.start + ((self.stop - self.start) / 2.0)
 			else:
 				start = self.start
 				stop = self.stop
@@ -155,11 +160,11 @@ class ScannerState():
 					freq = stop	# Should only happen once at the end if last is not equally spaced
 				for gain in self.gains:
 					for antenna in self.antennas:
-						states += [HardwareState(self, gain, antenna, self.lo_offset, freq)]
+						states += [HardwareState(self, gain, antenna, self.lo_offset, self.bandwidth, freq)]
 		else:
 			for gain in self.gains:
 				for antenna in self.antennas:
-					states += [HardwareState(self, gain, antenna, self.lo_offset)]
+					states += [HardwareState(self, gain, antenna, self.lo_offset, self.bandwidth)]
 		
 		return states
 
@@ -170,18 +175,20 @@ def _choose(val, default):
 
 # Sample rate will determine total available step
 class FrequencyRange():
-	def __init__(self, start=None, stop=None, step=None, edge=False):
+	def __init__(self, start=None, stop=None, step=None, edge=False, bandwidth=None):
 		self.start = start	# None: lowest supported
 		self.stop = stop	# None: highest supported
 		self.step =	step	# Relative to sample rate (None: use default)
 		self.edge = edge	# Start the LO at the range edge
+		self.bandwidth = bandwidth
 	def setup(self, freq_config, channel, config, chan_caps):
 		state = ScannerState(self, freq_config, channel, config, chan_caps)
 		# FrequencyRange
-		state.start = _choose(self.start, chan_caps.freq_range.start())
-		state.stop = _choose(self.stop, chan_caps.freq_range.stop())
+		state.start= _choose(self.start - freq_config.padding, chan_caps.freq_range.start())
+		state.stop = _choose(self.stop  + freq_config.padding, chan_caps.freq_range.stop())
 		state.step = _choose(self.step, freq_config.default_step) * config.rate
 		state.edge = self.edge
+		state.bandwidth = _choose(self.bandwidth, freq_config.default_bandwidth)
 		# FrequencyConfig
 		if freq_config.gains is None:
 			state.gains = channel.default_gains
@@ -209,12 +216,14 @@ _default_frequency_ranges = [FrequencyRange()]
 
 # Step is fraction of sample rate (bandwidth)
 class FrequencyConfig():
-	def __init__(self, frequency_ranges=_default_frequency_ranges, default_step=1.0, gains=None, relative_gain=None, antennas=None):
+	def __init__(self, frequency_ranges=_default_frequency_ranges, default_step=1.0, gains=None, relative_gain=None, antennas=None, default_bandwidth=None, padding=0.0):
 		self.frequency_ranges = frequency_ranges
 		self.default_step = default_step
 		self.gains = gains					# None: use default
 		self.relative_gain = relative_gain	# None: use default
 		self.antennas = antennas			# None: use default
+		self.default_bandwidth = default_bandwidth
+		self.padding = padding
 	def setup(self, channel, config, chan_caps):
 		freqs = []
 		for fr in self.frequency_ranges:
@@ -256,7 +265,7 @@ _default_channel_config = [ChannelConfig()]
 # Maps to a radio
 # Specify sample rate
 class Config():
-	def __init__(self, name, length=_default_sample_count, args="", rate=1e6, channel_config=_default_channel_config, noise_floor=_noise_floor, linked=False, tune_policy=TunePolicy(), skip_samples=0):
+	def __init__(self, name, length=_default_sample_count, args="", rate=1e6, channel_config=_default_channel_config, noise_floor=_noise_floor, linked=False, tune_policy=TunePolicy(), skip_samples=0, master_clock_rate=None):
 		self.name = name
 		self.length = length
 		self.args = args
@@ -266,6 +275,7 @@ class Config():
 		self.noise_floor = noise_floor
 		self.tune_policy = tune_policy
 		self.skip_samples = skip_samples
+		self.master_clock_rate = master_clock_rate
 		
 		if isinstance(self.length, float):
 			self.sample_count = int(self.rate * self.length)

@@ -25,6 +25,8 @@
 #  
 
 def format_freq(f, decimals=None, units=True):
+	if f is None:
+		return "(none)"
 	unit = ''
 	if f >= 1e9:
 		f /= 1e9
