@@ -54,7 +54,8 @@ def _stitch_array(orig, new, overlap):
 	
 	new_part = new[:overlap]
 	orig_part = orig[-overlap:]
-	part = numpy.add(orig_part, new_part)
+	ramp = numpy.linspace(0.0, 1.0, overlap)
+	part = numpy.multiply(new_part, ramp) + numpy.multiply(orig_part, numpy.subtract(numpy.ones(overlap), ramp))
 	return numpy.concatenate((orig[:-overlap], part, new[overlap:]))
 
 def main():
@@ -71,6 +72,7 @@ def main():
 	parser.add_option("-o", "--overlap", type="float", default=None, help="Overlap amount [default=%default]")
 	parser.add_option("-f", "--start-freq", type="float", default=None, help="Lower frequency limit [default=%default]")
 	parser.add_option("-e", "--stop-freq", type="float", default=None, help="Upper frequency limit [default=%default]")
+	parser.add_option("-v", "--verbose", action="store_true", default=False, help="Verbose output [default: %default]")
 	
 	(options, args) = parser.parse_args()
 	
@@ -89,7 +91,7 @@ def main():
 		channel_count = int(parts[3])
 		freq = float(parts[4])
 		antenna = parts[6].replace("_", "/")
-		idx = int(parts[7])
+		idx = int(parts[7].split('.')[0])
 		cap = CaptureFile(arg, options.samp_rate, parts[0], capture_time, int(parts[2]), idx, freq, float(parts[5]), antenna)
 		if idx in channels.keys():
 			channels[idx] += [cap]
@@ -135,7 +137,7 @@ def main():
 	
 	figsize = (figure_width, figure_height)
 	padding = {'wspace':spacing,'hspace':spacing,'top':1.-padding,'left':padding,'bottom':padding,'right':1.-padding}
-	fft_graph = realtime_graph(title="FFT", show=True, manual=True, redraw=False, figsize=figsize, padding=padding)
+	fft_graph = realtime_graph(title="FFT", show=True, manual=True, redraw=False, figsize=figsize, padding=padding, verbose=options.verbose)
 	fft_channel_graphs = {}
 	
 	pos_count = 0
@@ -185,11 +187,11 @@ def main():
 					freq_diff = cap.freq - freq_last
 					if freq_diff < 0:
 						raise Exception("Negative frequency step")
-					overlap = 1.0 - freq_diff / options.samp_rate
-					#print "Overlap:", overlap
+					overlap = max(0.0, 1.0 - (freq_diff / options.samp_rate))
+					# print "Overlap:", overlap
 				else:
 					overlap = options.overlap
-				overlap_bins = options.fft_length * overlap
+				overlap_bins = int(options.fft_length * overlap)
 			print "[%05d] Freq: %s (%s - %s) overlap bins: %d" % (cnt, format_freq(cap.freq), format_freq(freq_bottom), format_freq(freq_top), overlap_bins)
 			freq_line += [freq_bottom, freq_top]
 			freq_center_line += [cap.freq]
@@ -198,7 +200,7 @@ def main():
 			data = numpy.fromfile(cap.path, numpy.dtype(options.type))
 			print "[%05d] Read %d items from %s" % (cnt, len(data), cap.path)
 			
-			_num_ffts, _fft_avg, _fft_min, _fft_max = calc_fft(data, options.fft_length, verbose=False)
+			_num_ffts, _fft_avg, _fft_min, _fft_max = calc_fft(data, options.fft_length, verbose=options.verbose)
 			
 			fft_avg = _stitch_array(fft_avg, _fft_avg, overlap_bins)
 			fft_min = _stitch_array(fft_min, _fft_min, overlap_bins)
@@ -218,9 +220,10 @@ def main():
 			sub_title="Channel %i" % (channel_idx),
 			pos=subplot_pos,
 			y_limits=y_limits,
-			x_range=options.fft_length,
+			# x_range=, # Leave as auto
 			data=[fft_avg, fft_min, fft_max],
-			x=x)
+			x=x,
+			verbose=options.verbose)
 		
 		for freq in freq_line:
 			sub_graph.add_vert_line(freq, 'gray')
@@ -229,7 +232,7 @@ def main():
 		
 		pos_count = pos_count + 1
 	
-	#fft_graph.redraw()
+	# fft_graph.redraw() # Not necessary
 	fft_graph.go_modal()
 	
 	return 0
