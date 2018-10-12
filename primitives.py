@@ -184,8 +184,8 @@ class FrequencyRange():
 	def setup(self, freq_config, channel, config, chan_caps):
 		state = ScannerState(self, freq_config, channel, config, chan_caps)
 		# FrequencyRange
-		state.start= _choose(self.start - freq_config.padding, chan_caps.freq_range.start())
-		state.stop = _choose(self.stop  + freq_config.padding, chan_caps.freq_range.stop())
+		state.start= _choose(self.start, chan_caps.freq_range.start()) - freq_config.padding
+		state.stop = _choose(self.stop,  chan_caps.freq_range.stop())  + freq_config.padding
 		state.step = _choose(self.step, freq_config.default_step) * config.rate
 		state.edge = self.edge
 		state.bandwidth = _choose(self.bandwidth, freq_config.default_bandwidth)
